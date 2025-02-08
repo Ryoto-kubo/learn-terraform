@@ -10,8 +10,8 @@ terraform {
 
 locals {
   app_name = "001"
-  public_key_file  = "~/.ssh/id_rsa-ec2-key-${local.app_name}.id_rsa.pub"
-  private_key_file = "~/.ssh/id_rsa-ec2-key-${local.app_name}.id_rsa"
+  public_key_file  = "${local.app_name}-ec2-key-pair.pub"
+  private_key_file = "${local.app_name}-ec2-key-pair.pem"
 }
 
 provider "aws" {
@@ -131,24 +131,20 @@ resource "aws_security_group" "ec2_sg" {
 # Key Pair
 ####################################################
 resource "tls_private_key" "key_gen" {
-  algorithm = "SA"
+  algorithm = "RSA"
   rsa_bits  = 4096
 }
 
-resource "local_file" "private_key_pem" {
-  filename = local.private_key_file
-  content  = tls_private_key.key_gen.private_key_pem
-  provisioner "local-exec" {
-    command = "chmod 600 ${local.private_key_file}"
-  }
+resource "local_file" "public_key_openssh" {
+  filename = "${path.module}/${local.public_key_file}"
+  content  = tls_private_key.key_gen.public_key_openssh
+  file_permission = "0600"
 }
 
-resource "local_file" "public_key_openssh" {
-  filename = local.public_key_file
-  content  = tls_private_key.key_gen.public_key_openssh
-  provisioner "local-exec" {
-    command = "chmod 600 ${local.public_key_file}"
-  }
+resource "local_file" "private_key_pem" {
+  filename = "${path.module}/${local.private_key_file}"
+  content  = tls_private_key.key_gen.private_key_pem
+  file_permission = "0600"
 }
 
 resource "aws_key_pair" "key_pair" {
@@ -179,10 +175,61 @@ resource "aws_instance" "ec2" {
   ami = data.aws_ami.linux2023.id
   instance_type = "t2.micro"
   subnet_id = aws_subnet.public_subnet_1a.id
-
   vpc_security_group_ids = [aws_security_group.ec2_sg.id]
+  key_name = aws_key_pair.key_pair.key_name
+  associate_public_ip_address = true
 
   tags = {
     Name = "${local.app_name}-ec2"
   }
+}
+
+
+####################################################
+# Elastic IP
+####################################################
+resource "aws_eip" "eip" {
+  instance = aws_instance.ec2.id
+  domain = "vpc"
+  tags = {
+    Name = "${local.app_name}-eip"
+  }
+}
+
+
+####################################################
+# Acm
+####################################################
+resource "aws_acm_certificate" "certificate" {
+  domain_name = "*.${var.domain}"
+  validation_method = "DNS"
+
+  tags = {
+    Name = "${local.app_name}-certificate"
+  }
+}
+
+
+####################################################
+# Route53
+####################################################
+resource "aws_route53_zone" "zone" {
+  name = var.domain
+}
+
+resource "aws_route53_record" "certificate_validation" {
+  for_each = {
+    for dvo in aws_acm_certificate.certificate.domain_validation_options :
+    dvo.domain_name => {
+      name  = dvo.resource_record_name
+      type  = dvo.resource_record_type
+      value = dvo.resource_record_value
+    }
+  }
+
+  zone_id = aws_route53_zone.zone.zone_id
+  name    = each.value.name
+  type    = each.value.type
+  records = [each.value.value]
+  ttl     = 300
 }

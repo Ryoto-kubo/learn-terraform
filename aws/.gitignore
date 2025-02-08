@@ -7,3 +7,5 @@
 
 .terraform
 .terraform.*
+
+*-key-pair*
